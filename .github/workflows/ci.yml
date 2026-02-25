@@ -14,9 +14,6 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/k8s-gitops-api
 
 jobs:
-  # -----------------------------------------------
-  # Job 1: Test
-  # -----------------------------------------------
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -42,9 +39,6 @@ jobs:
           name: coverage-report
           path: services/api/coverage.out
 
-  # -----------------------------------------------
-  # Job 2: Build & Push Image
-  # -----------------------------------------------
   build:
     name: Build & Push
     runs-on: ubuntu-latest
@@ -57,7 +51,6 @@ jobs:
 
     outputs:
       image_tag: ${{ steps.meta.outputs.version }}
-      image_digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout code
@@ -68,7 +61,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.CR_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract Docker metadata
         id: meta
@@ -78,13 +71,11 @@ jobs:
           tags: |
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push
-        id: build
         uses: docker/build-push-action@v5
         with:
           context: services/api
@@ -95,9 +86,6 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
 
-  # -----------------------------------------------
-  # Job 3: Update Infra Repo (GitOps trigger)
-  # -----------------------------------------------
   update-infra:
     name: Update Infra Repo
     runs-on: ubuntu-latest
@@ -112,15 +100,9 @@ jobs:
           token: ${{ secrets.CR_PAT }}
           path: infra
 
-      - name: Update image tag in Helm values
+      - name: Update image tag
         run: |
           cd infra
-          # อัพเดท image tag ในไฟล์ values
-          sed -i 's|tag:.*|tag: "sha-${{ github.sha }}"' charts/api-service/values.yaml || true
-          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git add .
-          git diff --staged --quiet || git commit -m "chore: update api image to sha-${{ github.sha }}"
-          git push
+          git diff --staged --quiet || git commit -m "chore: update api image to sha-${{ github.sha }}" && git push || true
