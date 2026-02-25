@@ -1,0 +1,126 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'services/api/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/k8s-gitops-api
+
+jobs:
+  # -----------------------------------------------
+  # Job 1: Test
+  # -----------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: services/api/go.sum
+
+      - name: Run tests
+        working-directory: services/api
+        run: |
+          go test ./... -v -coverprofile=coverage.out
+          go tool cover -func=coverage.out
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: services/api/coverage.out
+
+  # -----------------------------------------------
+  # Job 2: Build & Push Image
+  # -----------------------------------------------
+  build:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      image_digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.CR_PAT }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: services/api
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  # -----------------------------------------------
+  # Job 3: Update Infra Repo (GitOps trigger)
+  # -----------------------------------------------
+  update-infra:
+    name: Update Infra Repo
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          repository: ZoFirsT/k8s-gitops-infra
+          token: ${{ secrets.CR_PAT }}
+          path: infra
+
+      - name: Update image tag in Helm values
+        run: |
+          cd infra
+          # อัพเดท image tag ในไฟล์ values
+          sed -i 's|tag:.*|tag: "sha-${{ github.sha }}"' charts/api-service/values.yaml || true
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add .
+          git diff --staged --quiet || git commit -m "chore: update api image to sha-${{ github.sha }}"
+          git push
